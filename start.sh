@@ -1,6 +1,2 @@
 #!/bin/bash
-# Railway-friendly startup: hanya jalankan Flask API
-python3 /app.py
-
-# Jika Flask berhenti, keep container alive
-while true; do sleep 3600; done
+exec gunicorn --bind 0.0.0.0:8080 --workers 1 --threads 2 --timeout 180 app:app

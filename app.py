@@ -1,5 +1,5 @@
 from flask import Flask, jsonify, request, Response
-import subprocess, urllib.request, time, random, os, re, json, threading
+import subprocess, urllib.request, socket, time, random, os, re, json, threading
 
 app = Flask(__name__)
 
@@ -7,7 +7,7 @@ app = Flask(__name__)
 WORKER_PORTS = [int(p) for p in os.environ.get("PROXY_PORTS", "8081,8082,8083,8084,8085,8086").split(",")]
 NUM_WORKERS = len(WORKER_PORTS)
 
-# Pool proxy tervalidasi (list of dict {proto_and_addr, ip})
+# Pool proxy (TCP terbuka) - list of dict {proxy, raw, proxy_proto, ip}
 proxy_pool = []
 current = {}  # idx -> {"port": int, "proxy": str, "ip": str}
 lock = threading.Lock()
@@ -15,15 +15,23 @@ lock = threading.Lock()
 PROXY_SOURCES = [
     ("socks5", "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all"),
     ("http",   "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"),
-    ("socks5", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt"),
     ("http",   "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"),
+    ("socks5", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt"),
     ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
 ]
 
+def test_connect(proxy, proto, timeout=5):
+    """Fast TCP connect check (low memory, high throughput)"""
+    try:
+        host, port = proxy.split(":")
+        s = socket.create_connection((host, int(port)), timeout=timeout)
+        s.close()
+        return True
+    except Exception:
+        return False
 
-
-def test_proxy(proxy, proto, timeout=10):
-    """Test proxy, return exit IP if reachable else None"""
+def test_exit_ip(proxy, proto, timeout=8):
+    """Curl through proxy to get exit IP (only for assign)"""
     scheme = "socks5h" if proto == "socks5" else proto
     try:
         res = subprocess.run(
@@ -38,8 +46,8 @@ def test_proxy(proxy, proto, timeout=10):
         pass
     return None
 
-def refresh_pool(max_test=120):
-    """Fetch & validate proxy lists, fill global proxy_pool"""
+def refresh_pool(max_test=300):
+    """Fetch & TCP-validate proxy lists, fill global proxy_pool"""
     raw = []
     for proto, url in PROXY_SOURCES:
         try:
@@ -55,13 +63,12 @@ def refresh_pool(max_test=120):
     raw = raw[:max_test]
 
     found = []
-    chunk = 12
+    chunk = 40
     def validate(batch):
         for proto, p in batch:
-            ip = test_proxy(p, proto)
-            if ip:
+            if test_connect(p, proto, timeout=4):
                 with lock:
-                    found.append({"proxy": f"{proto}://{p}", "raw": p, "proxy_proto": proto, "ip": ip})
+                    found.append({"proxy": f"{proto}://{p}", "raw": p, "proxy_proto": proto, "ip": None})
 
     threads = []
     for i in range(0, len(raw), chunk):
@@ -73,7 +80,7 @@ def refresh_pool(max_test=120):
 
     with lock:
         proxy_pool[:] = found
-    print(f"[POOL] validated {len(found)} proxies")
+    print(f"[POOL] {len(found)} proxies TCP-validated")
     return len(found)
 
 def start_gost(port, upstream=None):
@@ -84,8 +91,8 @@ def start_gost(port, upstream=None):
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
 
-def pick_and_assign(i, attempts=10):
-    """Pick a fresh working proxy from pool, start gost on WORKER_PORTS[i], store it"""
+def pick_and_assign(i, attempts=8):
+    """Pick from pool, start gost, verify exit IP"""
     port = WORKER_PORTS[i]
     with lock:
         pool = proxy_pool.copy()
@@ -94,7 +101,7 @@ def pick_and_assign(i, attempts=10):
     for item in pool[:attempts]:
         pnorm = item["raw"]
         proto = item["proxy_proto"]
-        ip = test_proxy(pnorm, proto, timeout=8)
+        ip = test_exit_ip(pnorm, proto, timeout=7)
         if ip:
             start_gost(port, item["proxy"])
             with lock:
@@ -103,12 +110,19 @@ def pick_and_assign(i, attempts=10):
             return ip
     return None
 
+def assign_or_refresh(i, attempts=8):
+    ip = pick_and_assign(i, attempts)
+    if not ip:
+        refresh_pool(max_test=200)
+        ip = pick_and_assign(i, attempts)
+    return ip
+
 def initial_setup():
     print("[SYS] Memuat proxy pool...")
-    refresh_pool(max_test=60)
+    refresh_pool(max_test=250)
 
     for i in range(NUM_WORKERS):
-        if not pick_and_assign(i, attempts=8):
+        if not assign_or_refresh(i, attempts=6):
             print(f"[SYS] worker {i + 1} gagal mendapatkan proxy, coba lagi nanti")
 
 @app.route('/status')
@@ -128,11 +142,7 @@ def rotate(worker_id):
         return jsonify({"status": "error", "msg": f"Worker ID 1-{NUM_WORKERS}"}), 400
     print(f"[API] Rotasi worker {worker_id}")
 
-    ip = pick_and_assign(idx, attempts=10)
-    if not ip:
-        refresh_pool(max_test=80)
-        ip = pick_and_assign(idx, attempts=10)
-
+    ip = assign_or_refresh(idx, attempts=8)
     if not ip:
         return jsonify({"status": "error", "msg": "Gagal mendapatkan proxy bekerja"}), 500
 
@@ -145,7 +155,7 @@ def rotate_all():
     print("[API] Rotasi semua worker")
     results = []
     for i in range(NUM_WORKERS):
-        ip = pick_and_assign(i, attempts=6)
+        ip = assign_or_refresh(i, attempts=6)
         with lock:
             info = current.get(i)
         results.append({"worker": i + 1, "ip": info.get("ip") if info else None})
@@ -155,13 +165,13 @@ def rotate_all():
 def refresh():
     with lock:
         proxy_pool.clear()
-    n = refresh_pool(max_test=80)
+    n = refresh_pool(max_test=250)
     return jsonify({"status": "ok", "pool_size": n})
 
 @app.route('/pool')
 def pool():
     with lock:
-        pool_data = [{"proxy": p["proxy"], "ip": p["ip"], "proto": p["proxy_proto"]} for p in proxy_pool[:50]]
+        pool_data = [{"proxy": p["proxy"], "proto": p["proxy_proto"], "ip": p.get("ip")} for p in proxy_pool[:50]]
     return jsonify({"pool_size": len(proxy_pool), "sample": pool_data})
 
 @app.route('/exit_ip/<int:worker_id>')
@@ -203,13 +213,8 @@ def proxy_request(worker_id, url):
     except Exception as e:
         return jsonify({"status": "error", "msg": str(e)}), 502
 
+# Auto-start pool loading saat module di-import (mis. oleh gunicorn)
+threading.Thread(target=initial_setup, daemon=True).start()
+
 if __name__ == '__main__':
-    # Jalankan Flask langsung & setup pool di background (Railway healthcheck butuh port 8080 segera)
-    def background_setup():
-        initial_setup()
-        # Auto refresh pool tiap 15 menit
-        while True:
-            time.sleep(900)
-            refresh_pool(max_test=80)
-    threading.Thread(target=background_setup, daemon=True).start()
-    app.run(host='0.0.0.0', port=8080, threaded=True)
+    app.run(host='0.0.0.0', port=8080)
