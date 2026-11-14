@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# 1. Jalankan API di Port 8000
+# 1. Jalankan API di Port 8080
 python3 /app.py &
 
 # 2. Inisialisasi 3 VPN dan Proxy (Port 8081, 8082, 8083)
@@ -16,6 +16,5 @@ for i in {0..2}; do
     gost -L=socks5://:$PORT?interface=tun$i > /dev/null 2>&1 &
 done
 
-echo "[SYS] Semua 3 VPN & Proxy berjalan! Menahan container agar tetap hidup..."
-# 👇 PERINTAH SAKTI AGAR CONTAINER TIDAK MATI 👇
+echo "[SYS] Semua 3 VPN & Proxy berjalan! Menahan container..."
 tail -f /dev/null
