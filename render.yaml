@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: proxy
+    env: docker
+    plan: free
+    healthCheckPath: /status
+    envVars:
+      - key: PORT
+        value: 8080
+      - key: PROXY_PORTS
+        value: "8081,8082,8083,8084,8085,8086"
