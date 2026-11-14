@@ -204,11 +204,12 @@ def proxy_request(worker_id, url):
         return jsonify({"status": "error", "msg": str(e)}), 502
 
 if __name__ == '__main__':
-    initial_setup()
-    # Auto refresh pool tiap 15 menit
-    def auto_refresh():
+    # Jalankan Flask langsung & setup pool di background (Railway healthcheck butuh port 8080 segera)
+    def background_setup():
+        initial_setup()
+        # Auto refresh pool tiap 15 menit
         while True:
             time.sleep(900)
             refresh_pool(max_test=80)
-    threading.Thread(target=auto_refresh, daemon=True).start()
+    threading.Thread(target=background_setup, daemon=True).start()
     app.run(host='0.0.0.0', port=8080, threaded=True)
