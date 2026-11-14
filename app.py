@@ -2,63 +2,52 @@ from flask import Flask, jsonify
 import subprocess, urllib.request, base64, time, random, os
 
 app = Flask(__name__)
-current_ip = "0.0.0.0"
 
-def get_ip():
-    try:
-        req = urllib.request.Request("https://api.ipify.org")
-        return urllib.request.urlopen(req, timeout=10).read().decode('utf-8')
-    except:
-        return None
-
-def rotate_vpn():
-    global current_ip
-    print("[API] Mematikan VPN lama...")
-    subprocess.run(["pkill", "openvpn"], capture_output=True)
-    time.sleep(2)
-    
-    print("[API] Mengunduh config VPN Gate...")
+def get_vpn_config():
     try:
         req = urllib.request.Request("http://www.vpngate.net/api/iphone/")
         res = urllib.request.urlopen(req, timeout=30).read().decode('utf-8')
-        lines = res.split('\n')
-        configs = []
-        for line in lines:
-            if line.startswith('#') or line.startswith('*'): continue
-            parts = line.split(',')
-            if len(parts) >= 15 and len(parts[14]) > 100:
-                configs.append(parts[14])
-                
-        if not configs: return False
-            
-        config = base64.b64decode(random.choice(configs)).decode('utf-8')
-        with open('/tmp/vpn.ovpn', 'w') as f:
-            f.write(config)
-            
-        print("[API] Menjalankan OpenVPN...")
-        subprocess.Popen(["openvpn", "--config", "/tmp/vpn.ovpn", "--daemon"])
-        
-        time.sleep(12)
-        new_ip = get_ip()
-        if new_ip:
-            current_ip = new_ip
-            print(f"[API] VPN Terhubung! IP Baru: {current_ip}")
-            return True
-    except Exception as e:
-        print(f"[API] Error: {e}")
-    return False
+        configs = [line.split(',')[14] for line in res.split('\n') if not line.startswith(('#', '*')) and len(line.split(',')) >= 15 and len(line.split(',')[14]) > 100]
+        if not configs: return None
+        return base64.b64decode(random.choice(configs)).decode('utf-8')
+    except: return None
 
-@app.route('/rotate')
-def api_rotate():
-    success = rotate_vpn()
-    if success: return jsonify({"status": "ok", "ip": current_ip})
-    return jsonify({"status": "error", "msg": "Gagal rotasi"}), 500
+@app.route('/rotate/<int:worker_id>')
+def rotate(worker_id):
+    # worker_id dari 1-6, index dari 0-5
+    idx = worker_id - 1
+    if idx < 0 or idx > 5:
+        return jsonify({"status": "error", "msg": "Worker ID 1-6"}), 400
+    
+    print(f"[API] Rotasi Worker {worker_id} (tun{idx})")
+    
+    # 1. Matikan Proxy dan VPN lama
+    subprocess.run(["pkill", "-f", f"gost.*:{8080+idx}"], capture_output=True)
+    subprocess.run(["pkill", "-f", f"openvpn.*tun{idx}"], capture_output=True)
+    time.sleep(2)
+    
+    # 2. Download config baru
+    config = get_vpn_config()
+    if not config:
+        return jsonify({"status": "error", "msg": "Gagal download config"}), 500
+        
+    with open(f'/tmp/vpn_{idx}.ovpn', 'w') as f:
+        f.write(config)
+        
+    # 3. Jalankan OpenVPN baru
+    subprocess.Popen(["openvpn", "--config", f"/tmp/vpn_{idx}.ovpn", "--dev", f"tun{idx}", "--route-nopull", "--daemon"])
+    time.sleep(5) # Tunggu tun interface siap
+    
+    # 4. Jalankan gost baru
+    subprocess.Popen(["gost", "-L", f"socks5://:{8080+idx}?interface=tun{idx}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    
+    return jsonify({"status": "ok", "msg": f"Worker {worker_id} rotated"})
 
 @app.route('/status')
-def api_status():
-    return jsonify({"ip": current_ip})
+def status():
+    return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    print("[SYS] Inisialisasi awal VPN...")
-    rotate_vpn()
-    app.run(host='0.0.0.0', port=8000)
+    # Railway biasanya menggunakan variabel PORT
+    port = int(os.environ.get("PORT", 8000))
+    app.run(host='0.0.0.0', port=port)
