@@ -20,7 +20,7 @@ def rotate(worker_id):
     
     print(f"[API] Rotasi Worker {worker_id} (tun{idx})")
     
-    subprocess.run(["pkill", "-f", f"gost.*:{8080+idx}"], capture_output=True)
+    subprocess.run(["pkill", "-f", f"gost.*:{8081+idx}"], capture_output=True)
     subprocess.run(["pkill", "-f", f"openvpn.*tun{idx}"], capture_output=True)
     time.sleep(2)
     
@@ -34,7 +34,7 @@ def rotate(worker_id):
     subprocess.Popen(["openvpn", "--config", f"/tmp/vpn_{idx}.ovpn", "--dev", f"tun{idx}", "--route-nopull", "--daemon"])
     time.sleep(5)
     
-    subprocess.Popen(["gost", "-L", f"socks5://:{8080+idx}?interface=tun{idx}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    subprocess.Popen(["gost", "-L", f"socks5://:{8081+idx}?interface=tun{idx}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     return jsonify({"status": "ok", "msg": f"Worker {worker_id} rotated"})
 
@@ -43,5 +43,4 @@ def status():
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    # Paksa API jalan di 8000
     app.run(host='0.0.0.0', port=8000)

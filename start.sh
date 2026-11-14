@@ -3,9 +3,9 @@
 # 1. Jalankan API di Port 8000
 python3 /app.py &
 
-# 2. Inisialisasi 3 VPN dan Proxy (Port 8080, 8081, 8082)
+# 2. Inisialisasi 3 VPN dan Proxy (Port 8081, 8082, 8083)
 for i in {0..2}; do
-    PORT=$((8080 + i))
+    PORT=$((8081 + i))
     echo "[SYS] Menyiapkan tun$i (Proxy Port: $PORT)..."
     
     curl -s "http://www.vpngate.net/api/iphone/" | grep -v "^#" | grep -v "^\*" | awk -F, '{print $15}' | grep -E "^[A-Za-z0-9+/=]+$" | shuf -n 1 | base64 -d > /tmp/vpn_$i.ovpn 2>/dev/null
@@ -16,5 +16,6 @@ for i in {0..2}; do
     gost -L=socks5://:$PORT?interface=tun$i > /dev/null 2>&1 &
 done
 
-echo "[SYS] Semua 3 VPN & Proxy berjalan!"
-wait
+echo "[SYS] Semua 3 VPN & Proxy berjalan! Menahan container agar tetap hidup..."
+# 👇 PERINTAH SAKTI AGAR CONTAINER TIDAK MATI 👇
+tail -f /dev/null
