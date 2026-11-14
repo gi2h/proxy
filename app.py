@@ -14,19 +14,16 @@ def get_vpn_config():
 
 @app.route('/rotate/<int:worker_id>')
 def rotate(worker_id):
-    # worker_id dari 1-6, index dari 0-5
     idx = worker_id - 1
     if idx < 0 or idx > 5:
         return jsonify({"status": "error", "msg": "Worker ID 1-6"}), 400
     
     print(f"[API] Rotasi Worker {worker_id} (tun{idx})")
     
-    # 1. Matikan Proxy dan VPN lama
     subprocess.run(["pkill", "-f", f"gost.*:{8080+idx}"], capture_output=True)
     subprocess.run(["pkill", "-f", f"openvpn.*tun{idx}"], capture_output=True)
     time.sleep(2)
     
-    # 2. Download config baru
     config = get_vpn_config()
     if not config:
         return jsonify({"status": "error", "msg": "Gagal download config"}), 500
@@ -34,11 +31,9 @@ def rotate(worker_id):
     with open(f'/tmp/vpn_{idx}.ovpn', 'w') as f:
         f.write(config)
         
-    # 3. Jalankan OpenVPN baru
     subprocess.Popen(["openvpn", "--config", f"/tmp/vpn_{idx}.ovpn", "--dev", f"tun{idx}", "--route-nopull", "--daemon"])
-    time.sleep(5) # Tunggu tun interface siap
+    time.sleep(5)
     
-    # 4. Jalankan gost baru
     subprocess.Popen(["gost", "-L", f"socks5://:{8080+idx}?interface=tun{idx}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     
     return jsonify({"status": "ok", "msg": f"Worker {worker_id} rotated"})
@@ -48,6 +43,5 @@ def status():
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    # Railway biasanya menggunakan variabel PORT
     port = int(os.environ.get("PORT", 8000))
     app.run(host='0.0.0.0', port=port)
