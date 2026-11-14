@@ -5,7 +5,7 @@ RUN echo "http://dl-cdn.alpinelinux.org/alpine/edge/testing" >> /etc/apk/reposit
 RUN apk update && apk add --no-cache \
     openvpn curl bash python3 py3-pip coreutils socat
 
-# Download gost (versi 3.0.0 dari repo go-gost) dan ekstrak
+# Download gost (versi 3.0.0)
 RUN wget -q https://github.com/go-gost/gost/releases/download/v3.0.0/gost_3.0.0_linux_amd64.tar.gz \
     && tar -xzf gost_3.0.0_linux_amd64.tar.gz \
     && mv gost /usr/local/bin/gost \
@@ -19,6 +19,7 @@ COPY app.py /app.py
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-EXPOSE 8000 8080 8081 8082 8083 8084 8085
+# EXPOSE API (8080) dan 3 Proxy (8081, 8082, 8083)
+EXPOSE 8080 8081 8082 8083
 
 CMD ["/start.sh"]
