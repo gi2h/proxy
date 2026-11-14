@@ -46,7 +46,7 @@ def test_exit_ip(proxy, proto, timeout=8):
         pass
     return None
 
-def refresh_pool(max_test=300):
+def refresh_pool(max_test=60):
     """Fetch & TCP-validate proxy lists, fill global proxy_pool"""
     raw = []
     for proto, url in PROXY_SOURCES:
@@ -63,12 +63,14 @@ def refresh_pool(max_test=300):
     raw = raw[:max_test]
 
     found = []
-    chunk = 40
+    # kecil & lambat: avoid abuse/port-scan flag dari IP hosting
+    chunk = 8
     def validate(batch):
         for proto, p in batch:
             if test_connect(p, proto, timeout=4):
                 with lock:
                     found.append({"proxy": f"{proto}://{p}", "raw": p, "proxy_proto": proto, "ip": None})
+            time.sleep(0.7)  # jeda antar koneksi keluar
 
     threads = []
     for i in range(0, len(raw), chunk):
@@ -91,7 +93,7 @@ def start_gost(port, upstream=None):
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
 
-def pick_and_assign(i, attempts=5):
+def pick_and_assign(i, attempts=3):
     """Pick from pool, start gost, verify exit IP (limited curl calls to avoid OOM)"""
     port = WORKER_PORTS[i]
     with lock:
@@ -101,7 +103,7 @@ def pick_and_assign(i, attempts=5):
     for item in pool[:attempts]:
         pnorm = item["raw"]
         proto = item["proxy_proto"]
-        ip = test_exit_ip(pnorm, proto, timeout=6)
+        ip = test_exit_ip(pnorm, proto, timeout=5)
         if ip:
             start_gost(port, item["proxy"])
             with lock:
@@ -110,19 +112,19 @@ def pick_and_assign(i, attempts=5):
             return ip
     return None
 
-def assign_or_refresh(i, attempts=8):
+def assign_or_refresh(i, attempts=3):
     ip = pick_and_assign(i, attempts)
     if not ip:
-        refresh_pool(max_test=200)
+        refresh_pool(max_test=40)
         ip = pick_and_assign(i, attempts)
     return ip
 
 def initial_setup():
     print("[SYS] Memuat proxy pool...")
-    refresh_pool(max_test=250)
+    refresh_pool(max_test=60)
 
     for i in range(NUM_WORKERS):
-        if not assign_or_refresh(i, attempts=6):
+        if not assign_or_refresh(i, attempts=3):
             print(f"[SYS] worker {i + 1} gagal mendapatkan proxy, coba lagi nanti")
 
 @app.route('/status')
@@ -142,7 +144,7 @@ def rotate(worker_id):
         return jsonify({"status": "error", "msg": f"Worker ID 1-{NUM_WORKERS}"}), 400
     print(f"[API] Rotasi worker {worker_id}")
 
-    ip = assign_or_refresh(idx, attempts=8)
+    ip = assign_or_refresh(idx, attempts=4)
     if not ip:
         return jsonify({"status": "error", "msg": "Gagal mendapatkan proxy bekerja"}), 500
 
@@ -155,7 +157,7 @@ def rotate_all():
     print("[API] Rotasi semua worker")
     results = []
     for i in range(NUM_WORKERS):
-        ip = assign_or_refresh(i, attempts=6)
+        ip = assign_or_refresh(i, attempts=3)
         with lock:
             info = current.get(i)
         results.append({"worker": i + 1, "ip": info.get("ip") if info else None})
@@ -165,7 +167,7 @@ def rotate_all():
 def refresh():
     with lock:
         proxy_pool.clear()
-    n = refresh_pool(max_test=250)
+    n = refresh_pool(max_test=60)
     return jsonify({"status": "ok", "pool_size": n})
 
 @app.route('/pool')
