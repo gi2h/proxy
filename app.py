@@ -91,8 +91,8 @@ def start_gost(port, upstream=None):
     subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(0.5)
 
-def pick_and_assign(i, attempts=8):
-    """Pick from pool, start gost, verify exit IP"""
+def pick_and_assign(i, attempts=5):
+    """Pick from pool, start gost, verify exit IP (limited curl calls to avoid OOM)"""
     port = WORKER_PORTS[i]
     with lock:
         pool = proxy_pool.copy()
@@ -101,7 +101,7 @@ def pick_and_assign(i, attempts=8):
     for item in pool[:attempts]:
         pnorm = item["raw"]
         proto = item["proxy_proto"]
-        ip = test_exit_ip(pnorm, proto, timeout=7)
+        ip = test_exit_ip(pnorm, proto, timeout=6)
         if ip:
             start_gost(port, item["proxy"])
             with lock:
