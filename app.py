@@ -20,6 +20,7 @@ def rotate(worker_id):
     
     print(f"[API] Rotasi Worker {worker_id} (tun{idx})")
     
+    # Port Proxy ada di 8081, 8082, 8083
     subprocess.run(["pkill", "-f", f"gost.*:{8081+idx}"], capture_output=True)
     subprocess.run(["pkill", "-f", f"openvpn.*tun{idx}"], capture_output=True)
     time.sleep(2)
@@ -43,4 +44,4 @@ def status():
     return jsonify({"status": "ok"})
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000)
+    app.run(host='0.0.0.0', port=8080) # <--- API di 8080
