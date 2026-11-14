@@ -1,0 +1,10 @@
+[build]
+buildCommand = "docker build -t proxy ."
+dockerfile = "Dockerfile"
+
+[deploy]
+startCommand = "./start.sh"
+restartPolicy = "always"
+
+[env]
+PORT = "8080"
