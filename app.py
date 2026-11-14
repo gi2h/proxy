@@ -13,16 +13,21 @@ current = {}  # idx -> {"port": int, "proxy": str, "ip": str}
 lock = threading.Lock()
 
 PROXY_SOURCES = [
-    ("socks5", "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayprotocol&protocol=socks5&proxy_format=ipport&format=text"),
-    ("http",   "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayprotocol&protocol=http&proxy_format=ipport&format=text"),
-    ("http",   "https://api.proxyscrape.com/v2/?request=displayprotocol&protocol=http&proxy_format=ipport&format=text"),
+    ("socks5", "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=socks5&timeout=10000&country=all&ssl=all&anonymity=all"),
+    ("http",   "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"),
+    ("socks5", "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/socks5.txt"),
+    ("http",   "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"),
+    ("socks5", "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/socks5.txt"),
 ]
+
+
 
 def test_proxy(proxy, proto, timeout=10):
     """Test proxy, return exit IP if reachable else None"""
+    scheme = "socks5h" if proto == "socks5" else proto
     try:
         res = subprocess.run(
-            ["curl", "-s", "-m", str(timeout), "-x", f"{proto}://{proxy}", "https://checkip.amazonaws.com/"],
+            ["curl", "-s", "-m", str(timeout), "-x", f"{scheme}://{proxy}", "https://checkip.amazonaws.com/"],
             capture_output=True, timeout=timeout + 2
         )
         if res.returncode == 0:
@@ -50,7 +55,7 @@ def refresh_pool(max_test=120):
     raw = raw[:max_test]
 
     found = []
-    chunk = 10
+    chunk = 12
     def validate(batch):
         for proto, p in batch:
             ip = test_proxy(p, proto)
@@ -60,7 +65,7 @@ def refresh_pool(max_test=120):
 
     threads = []
     for i in range(0, len(raw), chunk):
-        t = threading.Thread(target=validate, args=(raw[i::10],))
+        t = threading.Thread(target=validate, args=(raw[i:i + chunk],))
         t.start()
         threads.append(t)
     for t in threads:
@@ -153,6 +158,12 @@ def refresh():
     n = refresh_pool(max_test=80)
     return jsonify({"status": "ok", "pool_size": n})
 
+@app.route('/pool')
+def pool():
+    with lock:
+        pool_data = [{"proxy": p["proxy"], "ip": p["ip"], "proto": p["proxy_proto"]} for p in proxy_pool[:50]]
+    return jsonify({"pool_size": len(proxy_pool), "sample": pool_data})
+
 @app.route('/exit_ip/<int:worker_id>')
 def exit_ip(worker_id):
     idx = worker_id - 1
@@ -194,4 +205,10 @@ def proxy_request(worker_id, url):
 
 if __name__ == '__main__':
     initial_setup()
+    # Auto refresh pool tiap 15 menit
+    def auto_refresh():
+        while True:
+            time.sleep(900)
+            refresh_pool(max_test=80)
+    threading.Thread(target=auto_refresh, daemon=True).start()
     app.run(host='0.0.0.0', port=8080, threaded=True)
