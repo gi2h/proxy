@@ -1,71 +1,197 @@
-from flask import Flask, jsonify
-import subprocess, urllib.request, base64, time, random, os, socket
+from flask import Flask, jsonify, request, Response
+import subprocess, urllib.request, time, random, os, re, json, threading
 
 app = Flask(__name__)
 
-# Cek apakah bisa membuat TUN interface (untuk lingkungan lokal/Railway check)
-def can_use_tun():
-    try:
-        # Cek jika /dev/net ada (requirement untuk TUN)
-        return os.path.exists("/dev/net/tun")
-    except: return False
+# Jumlah worker & port (default 6). Bisa override via env PROXY_PORTS="8081,8082,..."
+WORKER_PORTS = [int(p) for p in os.environ.get("PROXY_PORTS", "8081,8082,8083,8084,8085,8086").split(",")]
+NUM_WORKERS = len(WORKER_PORTS)
 
-def get_vpn_config():
-    """Fallback: coba download tapi graceful degradation jika gagal"""
+# Pool proxy tervalidasi (list of dict {proto_and_addr, ip})
+proxy_pool = []
+current = {}  # idx -> {"port": int, "proxy": str, "ip": str}
+lock = threading.Lock()
+
+PROXY_SOURCES = [
+    ("socks5", "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayprotocol&protocol=socks5&proxy_format=ipport&format=text"),
+    ("http",   "https://api.proxyscrape.com/v3/free-proxy-list/get?request=displayprotocol&protocol=http&proxy_format=ipport&format=text"),
+    ("http",   "https://api.proxyscrape.com/v2/?request=displayprotocol&protocol=http&proxy_format=ipport&format=text"),
+]
+
+def test_proxy(proxy, proto, timeout=10):
+    """Test proxy, return exit IP if reachable else None"""
     try:
-        req = urllib.request.Request("http://www.vpngate.net/api/iphone/")
-        res = urllib.request.urlopen(req, timeout=15).read().decode('utf-8')
-        configs = [line.split(',')[14] for line in res.split('\n') if not line.startswith(('#', '*')) and len(line.split(',')) >= 15 and len(line.split(',')[14]) > 100]
-        if not configs: return None
-        return base64.b64decode(random.choice(configs)).decode('utf-8')
-    except: return None
+        res = subprocess.run(
+            ["curl", "-s", "-m", str(timeout), "-x", f"{proto}://{proxy}", "https://checkip.amazonaws.com/"],
+            capture_output=True, timeout=timeout + 2
+        )
+        if res.returncode == 0:
+            ip = res.stdout.decode().strip()
+            if re.match(r'^[\d.]+$', ip) or ':' in ip:
+                return ip
+    except Exception:
+        pass
+    return None
+
+def refresh_pool(max_test=120):
+    """Fetch & validate proxy lists, fill global proxy_pool"""
+    raw = []
+    for proto, url in PROXY_SOURCES:
+        try:
+            text = urllib.request.urlopen(url, timeout=25).read().decode('utf-8', 'ignore')
+            for line in text.splitlines():
+                line = line.strip()
+                if re.match(r'^[\d.]+:\d+$', line):
+                    raw.append((proto, line))
+        except Exception:
+            pass
+
+    random.shuffle(raw)
+    raw = raw[:max_test]
+
+    found = []
+    chunk = 10
+    def validate(batch):
+        for proto, p in batch:
+            ip = test_proxy(p, proto)
+            if ip:
+                with lock:
+                    found.append({"proxy": f"{proto}://{p}", "raw": p, "proxy_proto": proto, "ip": ip})
+
+    threads = []
+    for i in range(0, len(raw), chunk):
+        t = threading.Thread(target=validate, args=(raw[i::10],))
+        t.start()
+        threads.append(t)
+    for t in threads:
+        t.join()
+
+    with lock:
+        proxy_pool[:] = found
+    print(f"[POOL] validated {len(found)} proxies")
+    return len(found)
+
+def start_gost(port, upstream=None):
+    subprocess.run(["pkill", "-f", f"gost.*:{port}"], capture_output=True)
+    cmd = ["gost", "-L", f"http://:{port}"]
+    if upstream:
+        cmd += ["-F", upstream]
+    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    time.sleep(0.5)
+
+def pick_and_assign(i, attempts=10):
+    """Pick a fresh working proxy from pool, start gost on WORKER_PORTS[i], store it"""
+    port = WORKER_PORTS[i]
+    with lock:
+        pool = proxy_pool.copy()
+
+    random.shuffle(pool)
+    for item in pool[:attempts]:
+        pnorm = item["raw"]
+        proto = item["proxy_proto"]
+        ip = test_proxy(pnorm, proto, timeout=8)
+        if ip:
+            start_gost(port, item["proxy"])
+            with lock:
+                current[i] = {"port": port, "proxy": item["proxy"], "ip": ip}
+            print(f"[ASSIGN] worker {i + 1} port {port} -> {item['proxy']} (ip={ip})")
+            return ip
+    return None
+
+def initial_setup():
+    print("[SYS] Memuat proxy pool...")
+    refresh_pool(max_test=60)
+
+    for i in range(NUM_WORKERS):
+        if not pick_and_assign(i, attempts=8):
+            print(f"[SYS] worker {i + 1} gagal mendapatkan proxy, coba lagi nanti")
+
+@app.route('/status')
+def status():
+    with lock:
+        workers = [{"worker": i + 1, **current.get(i, {"port": WORKER_PORTS[i], "proxy": None, "ip": None})} for i in range(NUM_WORKERS)]
+        return jsonify({
+            "status": "ok",
+            "workers": workers,
+            "pool_size": len(proxy_pool)
+        })
 
 @app.route('/rotate/<int:worker_id>')
 def rotate(worker_id):
     idx = worker_id - 1
-    if idx < 0 or idx > 2:
-        return jsonify({"status": "error", "msg": "Worker ID 1-3"}), 400
-    
-    print(f"[API] Merotasi Worker {worker_id} (tun{idx})")
-    
-    # Kill processes dari rotasi sebelumnya
-    subprocess.run(["pkill", "-f", f"gost.*:{8081+idx}"], capture_output=True)
-    time.sleep(1)
-    
-    # Jika environment mendukung TUN, gunakan alur VPN penuh
-    if can_use_tun():
-        config = get_vpn_config()
-        if not config:
-            return jsonify({"status": "error", "msg": "Gagal download config VPN"}), 500
-            
-        with open(f'/tmp/vpn_{idx}.ovpn', 'w') as f:
-            f.write(config)
-            
-        subprocess.Popen(["openvpn", "--config", f"/tmp/vpn_{idx}.ovpn", "--dev", f"tun{idx}", "--route-nopull", "--daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        
-        # TUNGGU SAMPAI INTERFACE TUN MUNCUL
-        tun_ready = False
-        for _ in range(20):
-            time.sleep(1)
-            if os.path.exists(f"/sys/class/net/tun{idx}"):
-                tun_ready = True
-                break
-                
-        if not tun_ready:
-            print(f"[API] Gagal: tun{idx} timeout, fallback ke proxy tanpa TUN")
-        else:
-            time.sleep(2) # Beri waktu IP assignment
-    
-    # Jalankan gost SOCKS5 proxy (dengan atau tanpa TUN interface)
-    # Tanpa -F interface=tun, hanya binding port saja
-    subprocess.Popen(["gost", "-L", f"socks5://:{8081+idx}"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    
-    print(f"[API] Worker {worker_id} siap - proxy port {8081+idx}")
-    return jsonify({"status": "ok", "msg": f"Worker {worker_id} rotated", "port": 8081+idx, "tun_available": can_use_tun()})
+    if idx < 0 or idx >= NUM_WORKERS:
+        return jsonify({"status": "error", "msg": f"Worker ID 1-{NUM_WORKERS}"}), 400
+    print(f"[API] Rotasi worker {worker_id}")
 
-@app.route('/status')
-def status():
-    return jsonify({"status": "ok", "tun_supported": can_use_tun(), "ports": [8081, 8082, 8083]})
+    ip = pick_and_assign(idx, attempts=10)
+    if not ip:
+        refresh_pool(max_test=80)
+        ip = pick_and_assign(idx, attempts=10)
+
+    if not ip:
+        return jsonify({"status": "error", "msg": "Gagal mendapatkan proxy bekerja"}), 500
+
+    with lock:
+        info = current.get(idx)
+    return jsonify({"status": "ok", "msg": f"Worker {worker_id} rotated", "worker": worker_id, "port": info["port"], "ip": info["ip"], "proxy": info["proxy"], "pool_size": len(proxy_pool)})
+
+@app.route('/rotate_all')
+def rotate_all():
+    print("[API] Rotasi semua worker")
+    results = []
+    for i in range(NUM_WORKERS):
+        ip = pick_and_assign(i, attempts=6)
+        with lock:
+            info = current.get(i)
+        results.append({"worker": i + 1, "ip": info.get("ip") if info else None})
+    return jsonify({"status": "ok", "results": results})
+
+@app.route('/refresh')
+def refresh():
+    with lock:
+        proxy_pool.clear()
+    n = refresh_pool(max_test=80)
+    return jsonify({"status": "ok", "pool_size": n})
+
+@app.route('/exit_ip/<int:worker_id>')
+def exit_ip(worker_id):
+    idx = worker_id - 1
+    if idx < 0 or idx >= NUM_WORKERS:
+        return jsonify({"status": "error", "msg": f"Worker ID 1-{NUM_WORKERS}"}), 400
+    with lock:
+        info = current.get(idx)
+    return jsonify({"worker": worker_id, "ip": info.get("ip") if info else None, "port": info.get("port") if info else None})
+
+@app.route('/proxy/<int:worker_id>/<path:url>')
+def proxy_request(worker_id, url):
+    idx = worker_id - 1
+    if idx < 0 or idx >= NUM_WORKERS:
+        return jsonify({"status": "error", "msg": f"Worker ID 1-{NUM_WORKERS}"}), 400
+    if not url.startswith("http://") and not url.startswith("https://"):
+        url = "http://" + url
+
+    port = WORKER_PORTS[idx]
+    proxy_url = f"http://127.0.0.1:{port}"
+    proxy_handler = urllib.request.ProxyHandler({'http': proxy_url, 'https': proxy_url})
+    opener = urllib.request.build_opener(proxy_handler)
+    try:
+        target_req = urllib.request.Request(url, method=request.method)
+        for key, value in request.headers:
+            if key.lower() not in ('host', 'connection', 'content-length'):
+                target_req.add_header(key, value)
+        body = request.get_data() if request.method in ('POST', 'PUT', 'PATCH') else None
+        try:
+            res = opener.open(target_req, body, timeout=30)
+            data = res.read()
+            headers = [(k, v) for k, v in res.headers.items() if k.lower() not in ('transfer-encoding', 'connection')]
+            return Response(data, status=res.status, headers=headers)
+        except urllib.error.HTTPError as e:
+            data = e.read()
+            headers = [(k, v) for k, v in e.headers.items() if k.lower() not in ('transfer-encoding', 'connection')]
+            return Response(data, status=e.code, headers=headers)
+    except Exception as e:
+        return jsonify({"status": "error", "msg": str(e)}), 502
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8080)
+    initial_setup()
+    app.run(host='0.0.0.0', port=8080, threaded=True)
